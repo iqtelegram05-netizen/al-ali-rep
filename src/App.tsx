@@ -59,7 +59,8 @@ export default function App() {
   const [showLibrary, setShowLibrary] = useState(false);
   const [aiBubbleText, setAiBubbleText] = useState('');
   const [showAiBubble, setShowAiBubble] = useState(false);
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [isMobile, setIsMobile] = useState(false);
+  const [mounted, setMounted] = useState(false);
   const [activeModal, setActiveModal] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'ai', text: string }[]>([]);
   const [pdfText, setPdfText] = useState('');
@@ -70,6 +71,8 @@ export default function App() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
+    setMounted(true);
+    setIsMobile(window.innerWidth < 768);
     const handleResize = () => setIsMobile(window.innerWidth < 768);
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
@@ -87,14 +90,22 @@ export default function App() {
     
     const q = query(collection(db, 'books'), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const blacklist = ['test', 'temp', 'null', 'undefined', 'unknown', 'بحث', 'خيارات', 'سجل', 'أرشيف'];
+      const blacklist = [
+        'test', 'temp', 'null', 'undefined', 'unknown', 'demo',
+        'sample', 'example', 'placeholder', 'dummy', 'fake', 'mock',
+        'todo', 'fixme', 'blank', 'empty', 'none',
+        'بحث', 'خيارات', 'سجل', 'أرشيف'
+      ];
       const booksData = snapshot.docs
         .map(doc => ({ id: doc.id, ...doc.data() } as Book))
-        .filter(b => 
-          b.title && 
-          b.title !== 'عنوان غير معروف' && 
-          !blacklist.some(word => b.title.toLowerCase().includes(word.toLowerCase()))
-        );
+        .filter(b => {
+          if (!b.title) return false;
+          if (!b.sourceUrl) return false;
+          if (b.title === 'عنوان غير معروف') return false;
+          if (b.title.trim().length < 5) return false;
+          if (/^[\d\W\s]+$/.test(b.title.trim())) return false;
+          return !blacklist.some(word => b.title.toLowerCase().includes(word.toLowerCase()));
+        });
       setBooks(booksData);
     }, (err) => handleFirestoreError(err, OperationType.LIST, 'books'));
 
@@ -132,10 +143,27 @@ export default function App() {
       
       if (data.error) throw new Error(data.error);
 
+      if (data.type === 'empty') {
+        alert(data.message || 'لم يتم العثور على كتب PDF صالحة في هذا الرابط.');
+        setScrapeUrl('');
+        setIsScraping(false);
+        return;
+      }
+
       if (data.type === 'list') {
-        const validItems = data.items.filter((item: any) => item.title && item.url);
+        const strictBlacklist = [
+          'test', 'null', 'undefined', 'unknown', 'temp', 'demo',
+          'sample', 'example', 'dummy', 'fake', 'mock',
+          'بحث', 'خيارات', 'سجل', 'أرشيف'
+        ];
+        const validItems = data.items.filter((item: any) => {
+          if (!item.title || !item.url) return false;
+          if (item.title.trim().length < 5) return false;
+          if (/^[\d\W\s]+$/.test(item.title.trim())) return false;
+          return !strictBlacklist.some(w => item.title.toLowerCase().includes(w));
+        });
         if (validItems.length === 0) {
-          alert('لم يتم العثور على كتب تطابق معايير الفلترة الذكية في هذا الرابط.');
+          alert('لم يتم العثور على كتب حقيقية تطابق معايير الفلترة الصارمة.');
           setIsScraping(false);
           return;
         }
@@ -149,9 +177,9 @@ export default function App() {
           });
         }
         alert(`تم جلب ${validItems.length} كتاب بنجاح!`);
-      } else {
-        if (!data.title || data.title === 'عنوان غير معروف') {
-          alert('الرابط لا يحتوي على كتاب صالح للمعالجة.');
+      } else if (data.type === 'book') {
+        if (!data.title || data.title === 'عنوان غير معروف' || data.title.trim().length < 5) {
+          alert('الرابط لا يحتوي على كتاب حقيقي — العنوان مرفوض من المنخل.');
           setIsScraping(false);
           return;
         }
@@ -288,6 +316,7 @@ export default function App() {
   };
 
   if (!user) {
+    if (!mounted) return <div className="min-h-screen bg-white" />;
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center p-4 text-right overflow-hidden relative" dir="rtl">
         <div className="absolute inset-0 pointer-events-none opacity-[0.03]" 
@@ -336,6 +365,8 @@ export default function App() {
       </div>
     );
   }
+
+  if (!mounted) return <div className="min-h-screen bg-white" />;
 
   return (
     <div className="min-h-screen bg-white text-gray-900 font-sans overflow-hidden relative" dir="rtl">
