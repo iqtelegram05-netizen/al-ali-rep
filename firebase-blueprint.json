@@ -1,0 +1,43 @@
+{
+  "entities": {
+    "Book": {
+      "title": "Book",
+      "description": "A book indexed in the library",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "The title of the book" },
+        "author": { "type": "string", "description": "The author of the book" },
+        "sourceUrl": { "type": "string", "description": "The original URL of the book" },
+        "category": { "type": "string", "description": "The category (e.g., Hadith, Tafsir)" },
+        "content": { "type": "string", "description": "Extracted text content for AI processing" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "sourceUrl", "category"]
+    },
+    "UserProgress": {
+      "title": "UserProgress",
+      "description": "User reading progress and saved snippets",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "bookId": { "type": "string" },
+        "lastPage": { "type": "number" },
+        "savedTexts": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["userId", "bookId"]
+    }
+  },
+  "firestore": {
+    "/books/{bookId}": {
+      "schema": "Book",
+      "description": "Collection of indexed books"
+    },
+    "/userProgress/{progressId}": {
+      "schema": "UserProgress",
+      "description": "User-specific reading progress and saves"
+    }
+  }
+}

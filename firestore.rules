@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: books
+    // Fields:
+    //   - title: string (required)
+    //   - author: string
+    //   - sourceUrl: string (required)
+    //   - category: string (required)
+    //   - content: string
+    //   - createdAt: timestamp
+    //
+    // Collection: userProgress
+    // Fields:
+    //   - userId: string (required)
+    //   - bookId: string (required)
+    //   - lastPage: number
+    //   - savedTexts: list (strings)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "al5374653@gmail.com" && request.auth.token.email_verified == true);
+    }
+
+    function isValidBook(data) {
+      return data.keys().hasAll(['title', 'sourceUrl', 'category']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 500 &&
+             data.sourceUrl is string && data.sourceUrl.size() > 0 &&
+             data.category is string;
+    }
+
+    function isValidProgress(data) {
+      return data.keys().hasAll(['userId', 'bookId']) &&
+             data.userId == request.auth.uid &&
+             (data.lastPage == null || data.lastPage is number) &&
+             (data.savedTexts == null || data.savedTexts is list);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /books/{bookId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && isValidBook(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /userProgress/{progressId} {
+      allow read, write: if isAuthenticated() && (request.resource.data.userId == request.auth.uid || resource.data.userId == request.auth.uid);
+    }
+  }
+}
