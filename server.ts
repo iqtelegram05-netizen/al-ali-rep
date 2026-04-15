@@ -14,19 +14,109 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
 
+// ═══════════════════════════════════════════════════════════════
+//  المنخل الصارم (Strict Sieve) — ثوابت الفلترة
+// ═══════════════════════════════════════════════════════════════
+
+/** كلمات ممنوعة: أي نص يحتويها يُرفض فوراً */
+const BLACKLIST_WORDS = [
+  'test', 'null', 'undefined', 'unknown', 'temp', 'demo',
+  'بحث', 'خيارات', 'سجل', 'أرشيف', 'تحميل', 'قراءة',
+  'نسخة', 'كتاب', 'pdf', 'sample', 'example', 'placeholder',
+  'lorem', 'ipsum', 'dummy', 'fake', 'mock', 'todo',
+  'fixme', 'xxx', 'blank', 'empty', 'none', 'n/a',
+];
+
+/** أصغر طول مسموح لعنوان كتاب حقيقي */
+const MIN_TITLE_LENGTH = 5;
+
+/** أكبر عدد كتب مسموح من رابط واحد */
+const MAX_BOOKS_PER_SCRAPE = 100;
+
+/** أقصى طول محتوى نصي (لتجنب كسر Firestore) */
+const MAX_CONTENT_LENGTH = 50000;
+
+/**
+ *  الفلتر الصارم: يرفض النصوص الزبالة
+ *  - يتحقق من القائمة السوداء
+ *  - يرفض النصوص القصيرة جداً
+ *  - يرفض النصوص الفارغة أو التي تحتوي فقط أرقام/رموز
+ */
+function isCleanText(text: string): boolean {
+  if (!text || typeof text !== 'string') return false;
+  const cleaned = text.trim().toLowerCase();
+  if (cleaned.length < MIN_TITLE_LENGTH) return false;
+
+  // رفض النصوص التي هي فقط أرقام أو رموز
+  if (/^[\d\W\s]+$/.test(cleaned)) return false;
+
+  // رفض أي نص يحتوي كلمة من القائمة السوداء
+  return !BLACKLIST_WORDS.some(word => cleaned.includes(word));
+}
+
+/**
+ *  المنخل الرئيسي: يقبل فقط الروابط التي:
+ *  1. تنتهي بـ .pdf
+ *  2. يحتوي نص الربط على اسم كتاب حقيقي (بعد التنظيف)
+ */
+function isValidBookPdfLink(href: string | undefined, linkText: string): boolean {
+  if (!href || typeof href !== 'string') return false;
+  if (!linkText || typeof linkText !== 'string') return false;
+
+  // الفلتر الأساسي: الرابط يجب أن ينتهي بـ .pdf (حساس لحالة الأحرف أقل)
+  const hrefLower = href.toLowerCase();
+  if (!hrefLower.endsWith('.pdf')) return false;
+
+  // تنظيف نص الرابط
+  const cleanText = linkText.trim();
+  if (!isCleanText(cleanText)) return false;
+
+  return true;
+}
+
+/**
+ *  تنظيف عنوان الكتب: يزيل الضجيج ويحتفظ بالاسم الحقيقي
+ */
+function sanitizeTitle(rawTitle: string): string {
+  let title = rawTitle.trim();
+
+  // إزالة الأرقام البادئة (مثل "1. " أو "12-")
+  title = title.replace(/^\d+[\.\-\s\)]+/, '');
+
+  // إزالة التواريخ بين قوسين
+  title = title.replace(/\(\d{4}\)/g, '');
+  title = title.replace(/\d{4}\s*هـ/g, '');
+
+  // تقسيم على الفواصل والأقسام - نأخذ الجزء الأول فقط
+  title = title.split('-')[0].split('|')[0].split('،')[0].split(':')[0].trim();
+
+  // إزالة الأقواس الفارغة والمحتواة
+  title = title.replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '').trim();
+
+  // إزالة كلمات الضجيج من العنوان
+  title = title.replace(/تحميل|قراءة|كتاب|نسخة|pdf|online|free|مجاني/gi, '').trim();
+
+  // إزالة المسافات الزائدة
+  title = title.replace(/\s+/g, ' ').trim();
+
+  return title;
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
   app.use(express.json());
 
-  // API Route: Scrape Book Info or List
+  // ═══════════════════════════════════════════════════════════════
+  //  API: جلب الكتب — المنخل الصارم
+  // ═══════════════════════════════════════════════════════════════
   app.post("/api/scrape", async (req, res) => {
     const { url } = req.body;
-    if (!url) return res.status(400).json({ error: "URL is required" });
+    if (!url) return res.status(400).json({ error: "الرابط مطلوب" });
 
     try {
-      const response = await axios.get(url, { 
+      const response = await axios.get(url, {
         timeout: 15000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -34,96 +124,95 @@ async function startServer() {
       });
       const $ = cheerio.load(response.data);
 
-      // The Extraction Algorithm: Strictly identify book titles (The Sieve)
-      const bookLinks: any[] = [];
-      const blacklist = ['test', 'temp', 'null', 'undefined', 'unknown', 'بحث', 'خيارات', 'سجل', 'أرشيف'];
-      
-      // Clean up the page first: remove noise
-      $("script, style, nav, footer, header, .ads, #sidebar, .menu, .nav").remove();
+      // مسح عناصر الضجيج قبل البحث
+      $("script, style, nav, footer, header, .ads, #sidebar, .menu, .nav, .comment, .share").remove();
 
-      // Look for links that likely represent books
-      $("a").each((i, el) => {
+      // ═══════════════════════════════════════════════════
+      //  المنخل: نبحث فقط عن روابط .pdf حقيقية
+      // ═══════════════════════════════════════════════════
+      const bookLinks: { title: string; url: string }[] = [];
+      const seenTitles = new Set<string>();
+
+      $("a").each((_i, el) => {
         const href = $(el).attr("href");
-        let text = $(el).text().trim();
-        
-        if (!href || !text || text.length < 3) return;
+        const rawText = $(el).text().trim();
 
-        // Structural Check: Must be a book link or end in .pdf
-        const isPdf = href.toLowerCase().endsWith('.pdf');
-        const isBookLink = isPdf || 
-                          href.includes("book") || 
-                          href.includes("read") || 
-                          href.match(/\/\d+/) || 
-                          href.match(/id=\d+/) ||
-                          $(el).find('img[src*="book"]').length > 0;
-        
-        if (isBookLink) {
-          // Blacklist Check
-          const isBlacklisted = blacklist.some(word => text.toLowerCase().includes(word.toLowerCase()));
-          if (isBlacklisted) return;
+        // الفلتر الصارم: فقط روابط PDF مع اسم كتاب حقيقي
+        if (!isValidBookPdfLink(href, rawText)) return;
 
-          // Aggressive Cleaning: Remove numbers, dates, publishers, and noise
-          text = text.replace(/^\d+[\.\-\s]*/, '');
-          text = text.replace(/\(\d{4}\)/g, '').replace(/\d{4}\s*هـ/g, '');
-          text = text.split('-')[0].split('|')[0].split('،')[0].split(':')[0].trim();
-          text = text.replace(/\[.*?\]/g, '').replace(/\(.*?\)/g, '').trim();
-          text = text.replace(/تحميل|قراءة|كتاب|نسخة|pdf/gi, '').trim();
+        // تنظيف العنوان
+        const cleanTitle = sanitizeTitle(rawText);
 
-          if (text.length > 3) {
-            bookLinks.push({
-              title: text,
-              url: new URL(href, url).href
-            });
-          }
-        }
+        // إعادة التحقق بعد التنظيف
+        if (!isCleanText(cleanTitle)) return;
+        if (cleanTitle.length < MIN_TITLE_LENGTH) return;
+
+        // منع التكرار
+        if (seenTitles.has(cleanTitle)) return;
+        seenTitles.add(cleanTitle);
+
+        // بناء الرابط المطلق
+        const absoluteUrl = new URL(href!, url).href;
+
+        bookLinks.push({
+          title: cleanTitle,
+          url: absoluteUrl,
+        });
       });
 
-      if (bookLinks.length > 2) {
-        // Filter out duplicates and very short titles
-        const uniqueLinks = Array.from(new Set(bookLinks.map(l => l.title)))
-          .map(title => bookLinks.find(l => l.title === title))
-          .filter(l => l.title && l.title.length > 3);
-          
-        return res.json({ type: 'list', items: uniqueLinks.slice(0, 150) });
+      // إذا وجدنا أكثر من كتاب واحد — نُرجع قائمة
+      if (bookLinks.length > 0) {
+        return res.json({
+          type: 'list',
+          items: bookLinks.slice(0, MAX_BOOKS_PER_SCRAPE)
+        });
       }
 
-      // If not a list, treat as a single book
+      // إذا لم نجد روابط PDF — نحاول استخراج كتاب واحد من الصفحة
+      let title = $("meta[property='og:title']").attr("content") ||
+                  $("title").text().trim() ||
+                  $("h1").first().text().trim() || "";
 
-      let title = $("meta[property='og:title']").attr("content") || 
-                  $("title").text().trim() || 
-                  $("h1").first().text().trim() || 
-                  "عنوان غير معروف";
-      
-      // Clean title
+      // تنظيف العنوان
       title = title.split('|')[0].split('-')[0].trim();
-      
-      const author = $("meta[name='author']").attr("content") || 
+      title = sanitizeTitle(title);
+
+      // إذا العنوان غير صالح بعد التنظيف — نرفض
+      if (!isCleanText(title) || title.length < MIN_TITLE_LENGTH) {
+        return res.json({
+          type: 'empty',
+          message: 'لم يتم العثور على كتب PDF صالحة في هذا الرابط.'
+        });
+      }
+
+      const author = $("meta[name='author']").attr("content") ||
                      $("meta[property='book:author']").attr("content") ||
-                     $(".author").text().trim() ||
-                     "مؤلف غير معروف";
-      
-      // Extract raw text content cleanly
-      $("script, style, nav, footer, header, .ads, #sidebar").remove();
+                     $(".author").text().trim() || "مؤلف غير معروف";
+
+      // تنظيف المحتوى
       const rawText = $("body").text().replace(/\s+/g, ' ').trim();
 
       res.json({
         type: 'book',
         title,
-        author,
+        author: isCleanText(author) ? author : "مؤلف غير معروف",
         sourceUrl: url,
-        content: rawText.slice(0, 50000) // Increased limit for full content
+        content: rawText.slice(0, MAX_CONTENT_LENGTH)
       });
+
     } catch (error) {
       console.error("Scraping error:", error);
       res.status(500).json({ error: "فشل في جلب البيانات من هذا الرابط" });
     }
   });
 
-  // API Route: Fetch specific book content
+  // ═══════════════════════════════════════════════════════════════
+  //  API: جلب محتوى كتاب معين
+  // ═══════════════════════════════════════════════════════════════
   app.post("/api/fetch-content", async (req, res) => {
     const { url } = req.body;
     try {
-      const response = await axios.get(url, { 
+      const response = await axios.get(url, {
         timeout: 10000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -132,21 +221,22 @@ async function startServer() {
       const $ = cheerio.load(response.data);
       $("script, style, nav, footer, header, .ads").remove();
       const content = $("body").text().replace(/\s+/g, ' ').trim();
-      res.json({ content });
+      // حد أقصى للمحتوى لمنع كسر Firestore
+      res.json({ content: content.slice(0, MAX_CONTENT_LENGTH) });
     } catch (error) {
-      res.status(500).json({ error: "Failed to fetch content" });
+      res.status(500).json({ error: "فشل في جلب المحتوى" });
     }
   });
 
-  // API Route: Upload and Parse PDF
+  // ═══════════════════════════════════════════════════════════════
+  //  API: رفع وتحليل ملف PDF
+  // ═══════════════════════════════════════════════════════════════
   app.post("/api/upload-pdf", upload.single('file'), async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    if (!req.file) return res.status(400).json({ error: "لم يتم رفع ملف" });
 
     try {
       const data = await pdf(req.file.buffer);
-      // Limit to ~15 pages worth of text (approx 30,000 chars)
       const text = data.text.slice(0, 30000);
-      
       res.json({
         text,
         pageCount: data.numpages
@@ -157,7 +247,7 @@ async function startServer() {
     }
   });
 
-  // Vite middleware for development
+  // Vite middleware
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
